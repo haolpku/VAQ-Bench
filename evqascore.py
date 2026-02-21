@@ -1,29 +1,37 @@
-import os, torch, cv2, json, time, argparse, math, logging, tempfile
+import os, sys, torch, cv2, json, argparse, math
 from tqdm import tqdm
 from PIL import Image
-import numpy as np
-from torchvision import transforms
-from transformers import AutoTokenizer, AutoModelForSeq2SeqLM, CLIPProcessor, CLIPModel
-from ultralytics import YOLO
-from models.clip_lora import clip_lora
-from pathlib import Path
 from functools import partial
+from ultralytics import YOLO
+
+THIS_DIR = os.path.dirname(os.path.abspath(__file__))
+PAC_DIR = os.path.join(THIS_DIR, "pacscore")
+if PAC_DIR not in sys.path:
+    sys.path.insert(0, PAC_DIR)
+
+from models.clip_lora import clip_lora
 
 
 device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
 
-_MODELS = {
-    'ViT-B/32': '/path/to/PAC++_clip_ViT-B-32.pth',
-    'ViT-L/14': '/path/to/PAC++_clip_ViT-L-14.pth',
-}
-model_type, lora_r = 'ViT-L/14', 4
-clip_model, clip_preprocess = clip_lora.load(model_type, device=device, lora=lora_r)
-clip_tokenizer = partial(clip_lora.tokenize, truncate=True)
-clip_model.to(device).float().load_state_dict(torch.load(_MODELS[model_type])['state_dict'])
-clip_model.eval()
+def build_models(args):
+    clip_model, clip_preprocess = clip_lora.load(
+        args.clip_model_name, device=device, lora=args.clip_lora_r
+    )
+    clip_model = clip_model.to(device).float()
+    clip_tokenizer = partial(clip_lora.tokenize, truncate=True)
 
-yolo_path = '/path/to/yolo11x-seg.pt'
-yolo = YOLO(yolo_path)  # load a custom model
+    if args.clip_weights and os.path.exists(args.clip_weights):
+        state = torch.load(args.clip_weights, map_location=device)
+        if isinstance(state, dict) and "state_dict" in state:
+            state = state["state_dict"]
+        clip_model.load_state_dict(state, strict=True)
+    elif args.clip_weights:
+        raise FileNotFoundError(f"clip weights not found: {args.clip_weights}")
+
+    clip_model.eval()
+    yolo = YOLO(args.yolo_path)
+    return clip_model, clip_preprocess, clip_tokenizer, yolo
 
 
 def split_list(lst, n):
@@ -51,8 +59,8 @@ def normalize(A):
     A_norm = torch.linalg.norm(A, dim=-1, keepdim=True)
     return A / A_norm
 
-def read_video(vid, interval):
-    addr = f'/path/to/vatex-video-folder/{vid}.mp4'
+def read_video(vid, interval, video_folder):
+    addr = os.path.join(video_folder, f"{vid}.mp4")
     frames = []
     cap = cv2.VideoCapture(addr)
     frames, frame_count = [], 0
@@ -66,34 +74,43 @@ def read_video(vid, interval):
         frame_count += 1
     return frames
 
-def encode_video(images):
-    BATCH = 8
+def encode_video(images, clip_model):
+    BATCH = 64
     res = []
     with torch.no_grad():
-        for i in tqdm(range(0, len(images), BATCH), desc='  encode video'):
+       for i in range(0, len(images), BATCH):
             feats = clip_model.encode_image(images[i : i+BATCH].to(device)).float()
             res.append(feats)
     res = torch.cat(res, dim=0)
     res /= res.norm(dim=-1, keepdim=True)
     return res
 
-def segment_video(frames):
-    BATCH = 32
+def segment_video(frames, yolo):
+    BATCH = 64
     images = []
-    for i in tqdm(range(0, len(frames), BATCH), desc= '  segment'):
-        results = yolo(frames[i : i+BATCH], stream=True)
+    for i in range(0, len(frames), BATCH):
+        results = yolo(frames[i : i+BATCH], stream=True, verbose=False)
         for j, r in enumerate(results):
             for xyxy in r.boxes.xyxy:
                 x1, y1, x2, y2 = xyxy.cpu().numpy().astype(int)
                 images.append(frames[i + j][y1:y2, x1:x2])
     return images
 
-def preprocess(frames):
-    rgb = [Image.fromarray(i).convert('RGB') for i in tqdm(frames, desc=' +image convert')]
-    res = [clip_preprocess(i) for i in tqdm(rgb, desc=' +preprocess')]
-    return res
+def preprocess(frames, clip_preprocess):
+    rgb = [Image.fromarray(i).convert("RGB") for i in frames]
+    pixels = [clip_preprocess(i) for i in rgb]
+    return torch.stack(pixels)
 
-def get_video_feats(vpaths, args, cache_file = None, save_step = None, use_video_cache = None):
+def get_video_feats(
+    vpaths,
+    args,
+    clip_model,
+    clip_preprocess,
+    yolo,
+    cache_file=None,
+    save_step=None,
+    use_video_cache=None,
+):
     if use_video_cache:
         res = {}
         for file in use_video_cache:
@@ -110,25 +127,23 @@ def get_video_feats(vpaths, args, cache_file = None, save_step = None, use_video
         vpaths = [i for i in vpaths if i not in video_feats]
     
     step = 0
-    for vpath in tqdm(vpaths, desc='get video feats'):
+    for vpath in tqdm(vpaths, desc=f'Processing Chunk {args.chunk_idx}' if args.chunk_idx is not None else 'Processing Videos', position=0, leave=True):
         #### read video
-        frames = read_video(vpath, args.interval)
+        frames = read_video(vpath, args.interval, args.video_folder)
         if frames is None or len(frames) == 0:
             continue
         video_feats[vpath] = {}
         #### get global feat
-        images = preprocess(frames)
-        images = torch.stack(images)
-        image_feats = encode_video(images)
+        images = preprocess(frames, clip_preprocess)
+        image_feats = encode_video(images, clip_model)
         global_feat = normalize(torch.mean(image_feats, dim=0, keepdim=True))
         video_feats[vpath]['g'] = global_feat
         #### get local feat
-        images = segment_video(frames)
-        images = preprocess(images)
+        images = segment_video(frames, yolo)
         if len(images) == 0:
-            images = [clip_preprocess(Image.fromarray(i).convert("RGB")) for i in frames]
-        images = torch.stack(images)
-        local_feat = encode_video(images)
+            images = frames
+        images = preprocess(images, clip_preprocess)
+        local_feat = encode_video(images, clip_model)
         video_feats[vpath]['l'] = local_feat
         #### update count and save
         step += 1
@@ -139,18 +154,28 @@ def get_video_feats(vpaths, args, cache_file = None, save_step = None, use_video
         torch.save(video_feats, cache_file)
     return video_feats
 
-def get_text_feats(texts, args, is_key):
+def get_text_feats(texts, args, is_key, clip_model, clip_tokenizer):
     texts = [i.split(',') if is_key else [i] for i in texts]
     texts = [clip_tokenizer(i).to(device) for i in tqdm(texts, desc='tokenizing')]
     with torch.no_grad():
-        text_feats = [clip_model.encode_text(i) for i in tqdm(texts, desc='encoding')]
+        text_feats = []
+        for i in tqdm(texts, desc='encoding'):
+            feats = clip_model.encode_text(i)
+            text_feats.append(feats)
     text_feats = [i / i.norm(dim=-1, keepdim=True) for i in tqdm(text_feats, desc='normalizing')]
     return text_feats
 
-def get_score(vpaths, cands, keys, args, use_video_cache = None):
-    video_feats = get_video_feats(vpaths, args, use_video_cache=use_video_cache)
-    cand_feats = get_text_feats(cands, args, 0)
-    key_feats = get_text_feats(keys, args, 1)
+def get_score(vpaths, cands, keys, args, clip_model, clip_preprocess, clip_tokenizer, yolo, use_video_cache = None):
+    video_feats = get_video_feats(
+        vpaths,
+        args,
+        clip_model,
+        clip_preprocess,
+        yolo,
+        use_video_cache=use_video_cache,
+    )
+    cand_feats = get_text_feats(cands, args, 0, clip_model, clip_tokenizer)
+    key_feats = get_text_feats(keys, args, 1, clip_model, clip_tokenizer)
     
     pbar = tqdm(range(len(vpaths)), desc='get score')
     result = []
@@ -170,6 +195,7 @@ def get_score(vpaths, cands, keys, args, use_video_cache = None):
     return result
 
 def main(args):
+    clip_model, clip_preprocess, clip_tokenizer, yolo = build_models(args)
     run_name = f'{args.run_name}_{args.interval}'
     
     with open(args.info_file, 'r', encoding='utf-8') as f:
@@ -185,10 +211,18 @@ def main(args):
         
         cache_file = os.path.join(
             args.cache_folder,
-            f'{run_name}_{args.num_chunks}_{i}.pkl'
+            f'{run_name}_{args.num_chunks}_{args.chunk_idx}.pkl'
         )
         
-        get_video_feats(vpaths, args, cache_file=cache_file, save_step=10)
+        get_video_feats(
+            vpaths,
+            args,
+            clip_model,
+            clip_preprocess,
+            yolo,
+            cache_file=cache_file,
+            save_step=10,
+        )
     else:
         cands, keys = [], []
         vpaths = []
@@ -206,16 +240,36 @@ def main(args):
             ) for i in range(args.num_chunks)
         ]
         
-        result = get_score(vpaths, cands, keys, args, use_video_cache=use_video_cache)
+        result = get_score(
+            vpaths,
+            cands,
+            keys,
+            args,
+            clip_model,
+            clip_preprocess,
+            clip_tokenizer,
+            yolo,
+            use_video_cache=use_video_cache,
+        )
         
         res = {}
-        for i, vid in enumerate(info_.keys()):
-            if result[6*i] == -1:
+        ptr = 0
+        for vid in info_.keys():
+            cand_count = len(info_[vid]['cands'])
+            one_result = result[ptr : ptr + cand_count]
+            ptr += cand_count
+
+            if len(one_result) == 0 or one_result[0] == -1:
                 continue
+
             res[vid] = {
-                '0_ref_cands_score': result[6*i : 6*(i+1)],
-                'human_cands_score': eval(info_[vid]['scores']),
+                '0_ref_cands_score': one_result,
             }
+            if 'scores' in info_[vid]:
+                try:
+                    res[vid]['human_cands_score'] = eval(info_[vid]['scores'])
+                except Exception:
+                    pass
         
         store_file = os.path.join(args.result_folder, f'{run_name}.json')
         with open(store_file, 'w', encoding='utf-8') as f:
@@ -224,10 +278,15 @@ def main(args):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
 
-    parser.add_argument("--info-file", default='/path/to/vid_cans_score_dict.json')
-    parser.add_argument("--key-file", default='/path/to/cand_keywords.json')
-    parser.add_argument("--result-folder", default='/path/to/folder-to-store-results')
-    parser.add_argument("--cache-folder", default='/path/to/cache-folder')
+    parser.add_argument("--info-file", default='vid_cans_score_dict.json')
+    parser.add_argument("--key-file", default='cand_keywords.json')
+    parser.add_argument("--result-folder", default='results')
+    parser.add_argument("--cache-folder", default='cache')
+    parser.add_argument("--video-folder", default='videos')
+    parser.add_argument("--yolo-path", default='yolo11x-seg.pt')
+    parser.add_argument("--clip-model-name", default='ViT-L/14')
+    parser.add_argument("--clip-weights", default=None)
+    parser.add_argument("--clip-lora-r", type=int, default=4)
     parser.add_argument("--interval", type=int, help='video sample interval')
     parser.add_argument("--run-name")
     parser.add_argument("--preprocess", action='store_true')
