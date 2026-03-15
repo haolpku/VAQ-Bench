@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environments
+venv/
+env/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Model checkpoints (large files)
+*.pt
+*.pth
+*.ckpt
+*.bin
+*.safetensors
+
+# Cache and results
+cache/
+results/
+*.pkl
+
+# Logs
+*.log
+
+# Videos (too large for git)
+videos/
+*.mp4
+*.avi
+*.mkv
+*.mov
+

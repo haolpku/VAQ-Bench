@@ -1,19 +1,38 @@
-# VAQ-Bench: Video Answer Quality Benchmark
+# VAQ-Bench: A Benchmark for VideoQA Answer Quality Evaluation
 
-VAQ-Bench is a large-scale benchmark for evaluating the quality of video question-answering (VideoQA) systems. It contains **900 video–question pairs** sourced from [Video-MME](https://video-mme.github.io/), each paired with multiple candidate answers of varying quality, along with human-verified quality labels.
+<p align="center">
+  <a href="#dataset-overview">Overview</a> •
+  <a href="#dataset-statistics">Statistics</a> •
+  <a href="#data-format">Data Format</a> •
+  <a href="#benchmark-evaluation">Evaluation</a> •
+  <a href="#evqascore">EVQAScore</a> •
+  <a href="#license">License</a> •
+  <a href="#citation">Citation</a>
+</p>
 
-## Dataset Statistics
+<p align="center">
+  <a href="https://github.com/haolpku/VAQ-Bench"><img src="https://img.shields.io/badge/GitHub-VAQ--Bench-blue?logo=github" alt="GitHub"></a>
+  <a href="https://creativecommons.org/licenses/by/4.0/"><img src="https://img.shields.io/badge/License-CC%20BY%204.0-lightgrey.svg" alt="License: CC BY 4.0"></a>
+</p>
+
+**VAQ-Bench** is a human-aligned benchmark for VideoQA data quality evaluation, accepted at **ACM Multimedia 2026 (Dataset Track)**.
+
+It supports **pairwise answer comparison** under fixed video–question pairs: given a video and a question, two candidate answers are compared, and metrics are evaluated by their agreement with human preference. VAQ-Bench includes both **model-generated answers** (from GPT-5, Gemini-2.5-Pro, Gemini-2.5-Flash) and **controlled perturbations** (hallucinated and mismatched answers), enabling systematic evaluation of metric robustness.
+
+We also provide **EVQAScore**, a simple and efficient baseline for VideoQA quality evaluation built upon EMScore with sparse frame sampling and LLM-based keyword extraction.
+
+---
+
+## Dataset Overview
 
 | Item | Count |
 |---|---|
-| Total QA entries | 900 |
+| Total pairwise instances | 2,666 |
+| Unique video–question pairs | 900 |
 | Unique videos | 900 |
-| Total candidate answers | 2,666 |
 | Video durations | Short (300) / Medium (300) / Long (300) |
 
 ### Candidate Answer Types
-
-Each entry contains a subset of the following candidate answer types:
 
 | Type | Category | Count | Description |
 |---|---|---|---|
@@ -25,9 +44,9 @@ Each entry contains a subset of the following candidate answer types:
 
 ### Label Distribution
 
-Each candidate answer has a quality label: `1` (better than or equal to ground truth) or `-1` (worse than ground truth).
+Each candidate answer has a human-annotated quality label: `1` (better than or equal to ground truth) or `-1` (worse than ground truth).
 
-| Type | Label = 1 | Label = -1 |
+| Type | Label = 1 (Better) | Label = -1 (Worse) |
 |---|---|---|
 | Model_gpt5 | 186 | 188 |
 | Model_gemini2_5_pro | 185 | 147 |
@@ -62,6 +81,18 @@ Each candidate answer has a quality label: `1` (better than or equal to ground t
 | Spatial Reasoning | 22 |
 | Spatial Perception | 19 |
 | Temporal Perception | 17 |
+
+---
+
+## Dataset Statistics
+
+- **Questions**: Average length of 12.4 tokens
+- **Ground-truth answers**: Average length of 5.2 tokens
+- **Model-generated answers**: Average length of 14.1 tokens
+- **Inter-annotator agreement**: Fleiss' κ = 0.67 (substantial), raw agreement = 82%
+- **Annotation**: 3 independent annotators per instance, majority voting
+
+---
 
 ## Data Format
 
@@ -112,7 +143,9 @@ The dataset is stored in `data/VAQ_Bench.json` as a JSON list. Each entry has th
 | `ground_truth` | string | Human-verified ground-truth answer |
 | `candidates` | object | Dictionary of candidate answers, keyed by type |
 | `candidates.*.text` | string | The candidate answer text |
-| `candidates.*.label` | int | Quality label: `1` (good) or `-1` (bad) |
+| `candidates.*.label` | int | Quality label: `1` (better) or `-1` (worse) |
+
+---
 
 ## Videos
 
@@ -120,76 +153,124 @@ The source videos come from the [Video-MME](https://video-mme.github.io/) benchm
 
 - **Hugging Face**: [lmms-lab/Video-MME](https://huggingface.co/datasets/lmms-lab/Video-MME)
 
-## License
-The **annotations** (questions, ground-truth answers, candidate answers, and quality labels) in VAQ-Bench are released under the [Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International License (CC BY-NC-SA 4.0)](https://creativecommons.org/licenses/by-nc-sa/4.0/).
+---
 
-The **source videos** are from the [Video-MME](https://video-mme.github.io/) benchmark, which collects publicly available videos from YouTube. The videos are subject to their original YouTube licenses and the Video-MME terms of use. We do not redistribute the video files; users should download them from the [official Video-MME repository](https://huggingface.co/datasets/lmms-lab/Video-MME).
+## Benchmark Evaluation
 
-**Usage Restrictions:**
+We provide `evaluate.py` to measure the agreement between an automatic metric and human preference on VAQ-Bench.
 
-- This dataset is intended for **non-commercial research purposes only**.
-- Users must comply with YouTube's [Terms of Service](https://www.youtube.com/t/terms) when downloading and using the source videos.
-- We make no claims of ownership over the video content. If you are a content owner and wish to have your video removed, please contact us.
+### Prediction File Format
 
-**Disclaimer:** The candidate answers in this dataset are generated by large language models or constructed through controlled perturbations. They may contain factual errors, hallucinations, or biased content. These answers are provided solely for evaluation purposes and do not represent the views of the authors.
+Your metric should produce a JSON file keyed by `question_id`. For each question, provide the metric score for the ground-truth answer (`gt_score`) and the score for each candidate type:
 
-
-# EVQAScore
-## Prepare
-
-Download VATEX-EVAL dataset in the following link
-
-```
-https://drive.google.com/drive/folders/1jAfZZKEgkMEYFF2x1mhYo39nH-TNeGm6?usp=sharing
-```
-
-Download YOLO model checkpoint yolo11x-seg in the following link
-
-```
-https://github.com/ultralytics/assets/releases/download/v8.3.0/yolo11x-seg.pt
+```json
+{
+  "005-1": {
+    "gt_score": 0.82,
+    "Model_gpt5": 0.75,
+    "Model_gemini2_5_pro": 0.68,
+    "Noise_Hallucination": 0.55,
+    "Noise_Mismatch": 0.42
+  }
+}
 ```
 
-Download PAC-S++ clip model checkpoint PAC++_clip_ViT-L-14 in the following link
+### Running Evaluation
 
-```
-https://ailb-web.ing.unimore.it/publicfiles/pac++/PAC++_clip_ViT-L-14.pth
-```
-
-Download corresponding clip model code following instructions under
-
-```
-https://github.com/aimagelab/pacscore
+```bash
+python evaluate.py \
+  --prediction-file results/my_metric.json \
+  --benchmark-file  data/VAQ_Bench.json \
+  --metric-name "MyMetric"
 ```
 
-## Compute EVQAScore
-
-If your data is a jsonl where each line contains `video_path` and `caption`, you can prepare EVQAScore inputs first, then run extraction/scoring.
-
-### 1) Convert jsonl to EVQAScore files
+### Example Output
 
 ```
+==============================================================
+  VAQ-Bench Evaluation Results — EVQAScore
+==============================================================
+
+  Model-Generated Answers
+  ──────────────────────────────────────────────────
+    GPT-5                      70.1%  (262/374)
+    Gemini-2.5-Pro             64.5%  (214/332)
+    Gemini-2.5-Flash           62.5%  (168/269)
+
+  Controlled Perturbations
+  ──────────────────────────────────────────────────
+    Hallucination              68.3%  (540/791)
+    Mismatched                 73.9%  (665/900)
+
+  Overall                      70.0%  (1849/2666)
+==============================================================
+```
+
+### Baseline Results
+
+| Metric | GPT-5 | Gemini-2.5-Flash | Gemini-2.5-Pro | Hallucination | Mismatched |
+|---|---|---|---|---|---|
+| EMScore | 60.4 | 62.2 | 60.3 | 65.9 | 71.6 |
+| PAC-S | 64.6 | 57.9 | 56.7 | 67.1 | 72.8 |
+| PAC-S++ | 62.1 | 61.7 | 60.0 | 68.0 | 72.7 |
+| **EVQAScore** | **70.1** | **62.5** | **64.5** | **68.3** | **73.9** |
+
+---
+
+## EVQAScore
+
+EVQAScore is a simple and efficient baseline for VideoQA quality evaluation. It extends EMScore with:
+
+1. **Sparse Frame Sampling** — uniform sampling with interval `l=30`, reducing visual processing by ~97% with no observed accuracy degradation.
+2. **LLM-based Keyword Extraction** — extracts salient entities, actions, and attributes from the QA pair to improve the signal-to-noise ratio in textual matching.
+
+### Setup
+
+#### 1. Install Dependencies
+
+```bash
+pip install -r requirements.txt
+```
+
+#### 2. Download Required Models
+
+- **YOLO model**: Download `yolo11x-seg.pt` from [ultralytics/assets](https://github.com/ultralytics/assets/releases/download/v8.3.0/yolo11x-seg.pt)
+- **PAC-S++ CLIP model**: Download `PAC++_clip_ViT-L-14.pth` from [PAC-S++ weights](https://ailb-web.ing.unimore.it/publicfiles/pac++/PAC++_clip_ViT-L-14.pth)
+- **CLIP model code**: Clone [aimagelab/pacscore](https://github.com/aimagelab/pacscore) into a `pacscore/` directory
+
+#### 3. Download Videos
+
+Download videos from [Video-MME on Hugging Face](https://huggingface.co/datasets/lmms-lab/Video-MME) and place them in a `videos/` directory.
+
+### Computing EVQAScore
+
+#### Step 1: Convert Data to EVQAScore Format
+
+If your data is a JSONL file where each line contains `video_path` and `caption`:
+
+```bash
 python preprocess.py \
-  --jsonl-file /your_path.jsonl \
-  --video-root /your_video_root \
+  --jsonl-file /path/to/your_data.jsonl \
+  --video-root /path/to/video_root \
   --info-out ./vid_cans_score_dict.json \
   --cand-pkl-out ./candidates_list.pkl
 ```
 
-### 2) Extract keywords with sglang server
+#### Step 2: Extract Keywords with LLM
 
-Start your server:
+Start an sglang server:
 
-```
+```bash
 python -m sglang.launch_server \
-  --model-path /your_model_path \
-  --host 127.0.0.1 \
-  --port 30000 \
-  --tp 8 \
+  --model-path /path/to/your_llm \
+  --host 127.0.0.1 --port 30000 --tp 8 \
   --served-model-name your_model_name \
   --disable-cuda-graph
 ```
 
-```
+Run keyword extraction:
+
+```bash
 python keywords_extraction.py \
   --api-base http://127.0.0.1:30000/v1 \
   --served-model-name your_model_name \
@@ -199,21 +280,21 @@ python keywords_extraction.py \
   --num-workers 32
 ```
 
-### 3) Preprocess video chunks
+#### Step 3: Preprocess Video Features
 
-```
+```bash
 mkdir -p cache results
+
 for i in 0 1 2 3 4 5 6 7; do
   CUDA_VISIBLE_DEVICES=$i python evqascore.py \
     --preprocess \
     --interval 30 \
-    --num-chunks 8 \
-    --chunk-idx $i \
+    --num-chunks 8 --chunk-idx $i \
     --run-name myrun \
     --info-file ./vid_cans_score_dict.json \
     --key-file ./cand_keywords.json \
     --cache-folder ./cache \
-    --video-folder /your_video_folder \
+    --video-folder /path/to/videos \
     --yolo-path ./yolo11x-seg.pt \
     --clip-model-name ViT-L/14 \
     --clip-weights ./PAC++_clip_ViT-L-14.pth &
@@ -221,9 +302,9 @@ done
 wait
 ```
 
-### 4) Compute final EVQAScore
+#### Step 4: Compute Final Scores
 
-```
+```bash
 python evqascore.py \
   --interval 30 \
   --num-chunks 8 \
@@ -232,8 +313,63 @@ python evqascore.py \
   --key-file ./cand_keywords.json \
   --cache-folder ./cache \
   --result-folder ./results \
-  --video-folder /your_video_folder \
+  --video-folder /path/to/videos \
   --yolo-path ./yolo11x-seg.pt \
   --clip-model-name ViT-L/14 \
   --clip-weights ./PAC++_clip_ViT-L-14.pth
 ```
+
+---
+
+## Repository Structure
+
+```
+VAQ-Bench/
+├── data/
+│   └── VAQ_Bench.json          # Benchmark dataset (2,666 pairwise instances)
+├── evaluate.py                 # Benchmark evaluation script
+├── evqascore.py                # EVQAScore metric implementation
+├── keywords_extraction.py      # LLM-based keyword extraction
+├── preprocess.py               # Data preprocessing (JSONL → EVQAScore format)
+├── requirements.txt            # Python dependencies
+├── LICENSE                     # CC-BY-4.0 license
+└── readme.md                   # This file
+```
+
+---
+
+## License
+
+The **annotations** (questions, ground-truth answers, candidate answers, and quality labels) in VAQ-Bench are released under the [Creative Commons Attribution 4.0 International License (CC BY 4.0)](https://creativecommons.org/licenses/by/4.0/).
+
+The **source videos** are from the [Video-MME](https://video-mme.github.io/) benchmark, which collects publicly available videos from YouTube. The videos are subject to their original YouTube licenses and the Video-MME terms of use. We do not redistribute the video files; users should download them from the [official Video-MME repository](https://huggingface.co/datasets/lmms-lab/Video-MME).
+
+**Usage Restrictions:**
+- Users must comply with YouTube's [Terms of Service](https://www.youtube.com/t/terms) when downloading and using the source videos.
+- We make no claims of ownership over the video content.
+
+**Disclaimer:** The candidate answers in this dataset are generated by large language models or constructed through controlled perturbations. They may contain factual errors, hallucinations, or biased content. These answers are provided solely for evaluation purposes and do not represent the views of the authors.
+
+---
+
+## Citation
+
+If you find VAQ-Bench or EVQAScore useful in your research, please cite our paper:
+
+```bibtex
+@inproceedings{liang2026vaqbench,
+  title     = {VAQ-Bench: A Benchmark for VideoQA Answer Quality Evaluation},
+  author    = {Hao Liang and Meiyi Qiang and Zimo Meng and Wentao Zhang},
+  booktitle = {Proceedings of the 34th ACM International Conference on Multimedia (ACM MM)},
+  year      = {2026}
+}
+```
+
+---
+
+## Contact
+
+For questions or issues, please open a [GitHub Issue](https://github.com/haolpku/VAQ-Bench/issues) or contact:
+
+- Hao Liang: hao.liang@stu.pku.edu.cn
+- Wentao Zhang: wentao.zhang@pku.edu.cn
